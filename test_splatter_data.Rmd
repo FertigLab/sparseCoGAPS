@@ -1,0 +1,107 @@
+---
+title: "Test Splatter Data"
+output: html_document
+---
+
+```{r message=F, warning=F}
+#### load libraries ####
+setwd("/Users/Veronica/Documents/HOPKINS/Fertig/")
+library(CoGAPS)
+library(splatter)
+library(tidyverse)
+library(viridis)
+library(Rtsne)
+library(reshape)
+library(gplots)
+library(cowplot)
+source('simplicityGenes.R')
+```
+
+##Generate splatter data
+
+```{r}
+# three paths with ~33 cells each, 500 genes per cell
+params<-newSplatParams(nGenes=500, batchCells=100, de.prob=.9, group.prob=c(1/3, 1/3, 1/3),
+                       path.length=100, dropout.type="none")
+sim<-splatSimulate(params, method="path", verbose=F)
+
+#reorder, group by path and step in path
+sim.pheno<-sim@colData %>% as.data.frame() %>% select(Group, Step)
+sim.pheno<- dplyr::mutate(sim.pheno, Cell=row.names(sim.pheno))%>% dplyr::arrange(Group, Step)
+cells<-lapply(sim.pheno$Cell, function(x) substr(x, 5, nchar(x))) %>% unlist() %>% as.numeric()
+sim.pheno$Cell<-cells
+sim.pheno<-dplyr::mutate(sim.pheno, Cell.new=as.numeric(row.names(sim.pheno)) %>% unlist()) %>% dplyr::arrange(Cell.new)
+
+sim.D<-counts(sim) %>% as.matrix()
+sim.D<-sim.D[,as.numeric(sim.pheno$Cell %>%unlist())]
+sim.S<-assays(sim)$BCV %>% as.matrix()
+sim.S<-sim.S[,as.numeric(sim.pheno$Cell %>%unlist())]
+```
+
+##Visualize generated splatter data
+```{r warning=F}
+sim.D.t<- t(sim.D) %>% as.data.frame()
+sim.D.t$path<-sim.pheno$Group %>% as.factor() %>% as.numeric()
+sim.D.t$step<-sim.pheno$Cell.new %>% as.factor()
+colors = rainbow(length(unique(sim.D.t$step)))
+names(colors) = unique(sim.D.t$path)
+tsne <- Rtsne(sim.D.t[,-1], dims = 2, perplexity=30, max_iter = 500)
+exeTimeTsne<- system.time(Rtsne(sim.D.t[,-1], dims = 2, perplexity=30, max_iter = 500))
+
+## Plot t-sne
+tsne_plot<-as.data.frame(tsne$Y)
+ggplot(tsne_plot, aes(x=V1, y=V2))+geom_point(color=colors[sim.D.t$step], shape=(sim.D.t$path+14), size=5)
+```
+
+The t-sne plot indicates that there is a clustering for each path of cells, with more proximal steps in the pathway being closer than more distal ones. However, there is so much overlap among the paths that it may be difficult to differentiate one from another.
+
+```{r warning=F}
+## Plot heatmap
+temp<-log2(sim.D+1)
+heatmap.2(temp,
+          scale='row',
+          Colv=F,trace='none',
+          ColSideColors = (sim.pheno$Group %>% as.factor() %>% as.numeric() %>% as.character()))
+```
+
+Gene levels seem to have more to do with the individual cells themselves than overall pathways for this simulated data. That is, for the normalized gene expression, there is no obvious grouping among the paths and no obvious progression of gene expression within each path.
+
+```{r warning=F}
+## CoGAPS heatmap
+run<-CoGAPS(sim.D, sim.S, nFactor=3, nEquil=10000, nSample=10000, messages=F, nCores=4)
+
+simGenes <- simplicityGENES(As=run$Amean, Ps=run$Pmean)
+
+# threshold genes by unique association with each pattern
+patternMarkers <- list()
+for (i in 1:3) {
+  sortSim <- names(sort(simGenes[,paste0('Patt',i)],decreasing=F))
+  geneThresh <- min(which(simGenes[sortSim,paste0('Patt', i)] >
+                            apply(simGenes[sortSim,],1,min)))
+  markerGenes <- sortSim[1:(geneThresh-1)]
+  markerGenes <- unique(markerGenes)
+  if (geneThresh==1) {
+    markerGenes <- NA
+  }
+  patternMarkers[[i]] <- markerGenes
+}
+
+# get list of colors for each pattern
+patternCols <- rep(NA, length(unlist(patternMarkers)))
+names(patternCols) <- unlist(patternMarkers)
+for (i in 1:length(patternMarkers)) {
+  patternCols[patternMarkers[[i]]] <- rainbow(length(patternMarkers))[i]
+}
+
+# make heatmap of pattern marker gene
+DPM <- sim.D[unlist(patternMarkers),]
+DPM<-DPM[ , sort(colnames(DPM))]
+
+heatmap.2(DPM, scale='row', 
+        Rowv=F,Colv=F,trace='none',
+        RowSideColors = as.character(patternCols[unique(unlist(patternMarkers))]),
+        ColSideColors = (sim.pheno$Group %>% as.factor() %>% as.numeric() %>% as.character()),
+        rowsep = cumsum(sapply(patternMarkers,length)))
+```
+
+Visualizing the gene expression grouped by CoGAPS did not clarify the distinctions between cell paths.
